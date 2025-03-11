@@ -365,12 +365,27 @@
         .tooltip {
             display: none;
             position: absolute;
-            background-color: #333;
-            color: #fff;
-            padding: 5px 10px;
-            border-radius: 5px;
-            z-index: 100;
+            background-color: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 8px;
+            border-radius: 4px;
             font-size: 14px;
+            pointer-events: none;
+            z-index: 1000;
+            transform: translate(-50%, -120%);
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.3);
+        }
+        
+        /* Добавляем стрелку для тултипа, чтобы он выглядел как диалоговое окно */
+        .tooltip:after {
+            content: '';
+            position: absolute;
+            bottom: -10px;
+            left: 50%;
+            margin-left: -5px;
+            border-width: 5px;
+            border-style: solid;
+            border-color: rgba(0, 0, 0, 0.8) transparent transparent transparent;
         }
         
         button:hover .tooltip {
@@ -668,6 +683,7 @@
             
             <canvas id="graph-canvas" class="graph-canvas" width="800" height="400"></canvas>
             <div class="zoom-hint">Используйте Ctrl + колесо мыши для масштабирования, зажмите ЛКМ для перемещения</div>
+            <div class="tooltip" id="graph-tooltip"></div>
             
             <div class="graph-navigation">
                 <button id="reset-view">Сбросить вид</button>
@@ -685,22 +701,21 @@
         document.addEventListener('DOMContentLoaded', function() {
             // Состояние калькулятора
             const state = {
-                currentInput: '0',
-                fullExpression: '',
-                memory: 0,
-                previousInput: '',
-                operation: null,
-                resetInput: false,
-                lastResult: 0,
-                lastOperation: null,
-                brackets: 0,
-                hasMemory: false,
-                history: [],
-                historyVisible: false,
-                scientificMode: false,
-                lastClickTime: 0,
-                lastClickedOperation: null,
-                isCalculating: false
+                currentInput: '0',           // Текущий ввод (отображается на дисплее)
+                previousInput: '',           // Предыдущий ввод (для операций)
+                operation: null,             // Текущая операция
+                waitingForOperand: false,    // Ожидается ли ввод нового числа
+                justCalculated: false,       // Был ли только что выполнен расчет (=)
+                lastResult: 0,               // Последний результат вычислений
+                lastOperation: null,         // Последняя операция (для повторного =)
+                lastOperand: null,           // Последний операнд (для повторного =)
+                memory: 0,                   // Значение в памяти
+                hasMemory: false,            // Флаг наличия значения в памяти
+                history: [],                 // История вычислений
+                historyVisible: false,       // Видимость панели истории
+                scientificMode: false,       // Научный режим
+                fullExpression: '',          // Полное выражение (для научного режима)
+                brackets: 0                  // Счетчик открытых скобок
             };
             
             // Элементы DOM
@@ -729,16 +744,18 @@
             function updateDisplay() {
                 current.textContent = state.currentInput;
                 
-                // Отображение текущей операции или полного выражения
-                if (state.fullExpression) {
+                // Отображение операции или истории в зависимости от режима
+                if (state.scientificMode && state.fullExpression) {
                     history.textContent = state.fullExpression;
                 } else if (state.operation && state.previousInput) {
+                    // В обычном режиме показываем текущую операцию
                     const opSymbol = getOperationSymbol(state.operation);
-                    history.textContent = `${state.previousInput} ${opSymbol}`;
+                    history.textContent = state.previousInput + ' ' + opSymbol;
                 } else {
                     history.textContent = '';
                 }
                 
+                // Показываем индикатор памяти, если есть что-то в памяти
                 memoryIndicator.textContent = state.hasMemory ? 'M' : '';
             }
             
@@ -747,7 +764,7 @@
                 if (!state.historyVisible) return;
                 
                 historyPanel.innerHTML = '';
-                state.history.slice(-10).forEach((item, index) => {
+                state.history.slice(-10).forEach((item) => {
                     const historyItem = document.createElement('div');
                     historyItem.className = 'history-item';
                     historyItem.textContent = `${item.expression} = ${item.result}`;
@@ -782,10 +799,16 @@
             
             // Обработка ввода цифр
             function handleDigit(digit) {
-                if (state.resetInput) {
+                // Если ожидается ввод нового числа, начинаем его
+                if (state.waitingForOperand) {
                     state.currentInput = digit;
-                    state.resetInput = false;
+                    state.waitingForOperand = false;
+                } else if (state.justCalculated) {
+                    // Если только что произведен расчет, начинаем новый ввод
+                    state.currentInput = digit;
+                    state.justCalculated = false;
                 } else {
+                    // Добавляем к текущему вводу
                     state.currentInput = state.currentInput === '0' ? digit : state.currentInput + digit;
                 }
                 updateDisplay();
@@ -793,26 +816,125 @@
             
             // Обработка десятичной точки
             function handleDecimal() {
-                if (state.resetInput) {
+                // Если ожидается новый операнд, начинаем с "0."
+                if (state.waitingForOperand) {
                     state.currentInput = '0.';
-                    state.resetInput = false;
+                    state.waitingForOperand = false;
+                } else if (state.justCalculated) {
+                    // Если только что нажали =, начинаем новый ввод
+                    state.currentInput = '0.';
+                    state.justCalculated = false;
                 } else if (state.currentInput.indexOf('.') === -1) {
+                    // Добавляем точку, если ее еще нет
                     state.currentInput += '.';
                 }
                 updateDisplay();
             }
             
-            // Обработка отрицательного числа
+            // Обработка смены знака
             function handleNegate() {
                 if (state.currentInput !== '0') {
-                    state.currentInput = state.currentInput.startsWith('-') 
-                        ? state.currentInput.substring(1) 
-                        : '-' + state.currentInput;
+                    if (state.currentInput.startsWith('-')) {
+                        state.currentInput = state.currentInput.substring(1);
+                    } else {
+                        state.currentInput = '-' + state.currentInput;
+                    }
+                    updateDisplay();
                 }
+            }
+            
+          
+                function handleOperation(op) {
+                // Если в научном режиме, обрабатываем полное выражение
+                if (state.scientificMode) {
+                    const opSymbol = getOperationSymbol(op);
+                    
+                    if (state.justCalculated) {
+                        // Если только что был вычислен результат, используем его в новом выражении
+                        state.fullExpression = state.currentInput + ' ' + opSymbol + ' ';
+                        state.justCalculated = false;
+                    } else if (state.waitingForOperand) {
+                        // Если ожидается ввод, просто меняем операцию
+                        // Проверяем, заканчивается ли выражение на закрывающую скобку
+                        if (state.fullExpression.trim().endsWith(')')) {
+                            // Если да, то добавляем операцию после скобки
+                            state.fullExpression += ' ' + opSymbol + ' ';
+                        } else {
+                            // Иначе заменяем предыдущую операцию
+                            state.fullExpression = state.fullExpression.slice(0, -2) + opSymbol + ' ';
+                        }
+                    } else {
+                        // Добавляем текущий ввод и операцию
+                        state.fullExpression += state.currentInput + ' ' + opSymbol + ' ';
+                    }
+                    
+                    state.waitingForOperand = true;
+                    updateDisplay();
+                    return;
+                }
+                
+                // Стандартный режим калькулятора
+                const currentValue = parseFloat(state.currentInput);
+                
+                // Если мы ожидаем операнд, но получили операцию
+                if (state.waitingForOperand && state.operation) {
+                    // Просто меняем операцию
+                    state.operation = op;
+                    updateDisplay();
+                    return;
+                }
+                
+                // Если это не первая операция, сначала выполняем предыдущую
+                if (!state.justCalculated && state.operation && state.previousInput) {
+                    const prevValue = parseFloat(state.previousInput);
+                    const result = performCalculation(prevValue, currentValue, state.operation);
+                    
+                    // Добавляем в историю
+                    addToHistory(`${prevValue} ${getOperationSymbol(state.operation)} ${currentValue}`, result);
+                    
+                    state.currentInput = result.toString();
+                    state.lastResult = result;
+                }
+                
+                // Сохраняем текущее значение и операцию
+                state.previousInput = state.currentInput;
+                state.operation = op;
+                state.lastOperation = op;
+                state.waitingForOperand = true;
+                state.justCalculated = false;
+                
                 updateDisplay();
             }
             
-            // Парсинг выражения с учетом скобок
+            // Выполнение вычисления
+            function performCalculation(a, b, operation) {
+                let result;
+                
+                switch (operation) {
+                    case 'add':
+                        result = a + b;
+                        break;
+                    case 'subtract':
+                        result = a - b;
+                        break;
+                    case 'multiply':
+                        result = a * b;
+                        break;
+                    case 'divide':
+                        result = a / b;
+                        break;
+                    case 'power':
+                        result = Math.pow(a, b);
+                        break;
+                    default:
+                        return b;
+                }
+                
+                // Округление для избежания ошибок с плавающей точкой
+                return parseFloat(result.toFixed(12));
+            }
+            
+            // Парсинг выражения с учетом скобок (для научного режима)
             function parseExpression(expr) {
                 // Нормализация выражения
                 expr = expr.replace(/×/g, '*').replace(/÷/g, '/').replace(/\^/g, '**');
@@ -826,143 +948,12 @@
                 }
             }
             
-            // Обработка операций
-            function handleOperation(op, isDoubleClick = false) {
-                // Если калькулятор в научном режиме и поддерживает сложные выражения
-                if (state.scientificMode) {
-                    const opSymbol = getOperationSymbol(op);
-                    
-                    // Для двойного клика на операцию автоматически выполняем операцию с последним результатом
-                    if (isDoubleClick && state.lastResult !== 0) {
-                        if (state.currentInput === '0' || state.resetInput) {
-                            state.currentInput = state.lastResult.toString();
-                        }
-                        
-                        // Добавляем операцию к текущему вводу
-                        state.fullExpression = state.currentInput;
-                        handleEquals();
-                        updateDisplay();
-                        return;
-                    }
-                    
-                    // Обычный клик - добавляем операцию к выражению
-                    if (state.resetInput && state.fullExpression) {
-                        // Если пользователь только что нажал = и теперь нажимает операцию,
-                        // используем результат как начало нового выражения
-                        state.fullExpression = state.currentInput + ' ' + opSymbol + ' ';
-                    } else {
-                        // Иначе добавляем операцию к текущему выражению
-                        state.fullExpression += state.currentInput + ' ' + opSymbol + ' ';
-                    }
-                    
-                    state.resetInput = true;
-                    updateDisplay();
-                    return;
-                }
-                
-                // Обычный калькулятор - стандартная логика
-                const currentValue = parseFloat(state.currentInput);
-                
-                // Если двойной клик, используем последний результат и повторяем операцию
-                if (isDoubleClick && state.lastOperation) {
-                    state.previousInput = currentValue.toString();
-                    state.operation = state.lastOperation;
-                    const result = calculate();
-                    state.currentInput = result.toString();
-                    state.previousInput = result.toString();
-                    state.resetInput = true;
-                    state.lastResult = result;
-                    
-                    // Добавляем в историю
-                    addToHistory(`${state.previousInput} ${getOperationSymbol(state.operation)} ${currentValue}`, result);
-                    
-                    updateDisplay();
-                    return;
-                }
-                
-                // Обычная обработка операции
-                if (state.operation && !state.resetInput) {
-                    // Сначала выполняем ожидающую операцию
-                    const prevValue = parseFloat(state.previousInput);
-                    const result = calculate();
-                    
-                    // Добавляем в историю
-                    addToHistory(`${prevValue} ${getOperationSymbol(state.operation)} ${currentValue}`, result);
-                    
-                    state.currentInput = result.toString();
-                    state.lastResult = result;
-                }
-                
-                state.previousInput = state.currentInput;
-                state.operation = op;
-                state.lastOperation = op;
-                state.resetInput = true;
-                
-                updateDisplay();
-            }
-            
-            // Вычисление результата
-            function calculate() {
-                // Для научного режима с полным выражением
-                if (state.scientificMode && state.fullExpression) {
-                    try {
-                        const expr = state.fullExpression + state.currentInput;
-                        const result = parseExpression(expr);
-                        
-                        // Добавляем в историю
-                        addToHistory(expr, result);
-                        
-                        state.lastResult = result;
-                        state.fullExpression = '';
-                        state.currentInput = isFinite(result) ? result.toString() : 'Ошибка';
-                        state.resetInput = true;
-                        
-                        return result;
-                    } catch (e) {
-                        console.error('Ошибка при вычислении:', e);
-                        state.currentInput = 'Ошибка';
-                        state.fullExpression = '';
-                        state.resetInput = true;
-                        updateDisplay();
-                        return NaN;
-                    }
-                }
-                
-                // Для обычного режима
-                const prev = parseFloat(state.previousInput);
-                const current = parseFloat(state.currentInput);
-                let result = 0;
-                
-                switch (state.operation) {
-                    case 'add':
-                        result = prev + current;
-                        break;
-                    case 'subtract':
-                        result = prev - current;
-                        break;
-                    case 'multiply':
-                        result = prev * current;
-                        break;
-                    case 'divide':
-                        result = prev / current;
-                        break;
-                    case 'power':
-                        result = Math.pow(prev, current);
-                        break;
-                    default:
-                        result = current;
-                }
-                
-                // Округление для избежания ошибок с плавающей точкой
-                result = parseFloat(result.toFixed(12));
-                return isFinite(result) ? result : 0;
-            }
-            
-            // Обработка равенства
+            // Обработка нажатия на равно
             function handleEquals() {
+                // Научный режим
                 if (state.scientificMode && state.fullExpression) {
-                    // Для научного режима с полным выражением
                     try {
+                        // Собираем полное выражение
                         const expr = state.fullExpression + state.currentInput;
                         const result = parseExpression(expr);
                         
@@ -972,7 +963,7 @@
                         state.lastResult = result;
                         state.fullExpression = '';
                         state.currentInput = isFinite(result) ? result.toString() : 'Ошибка';
-                        state.resetInput = true;
+                        state.justCalculated = true;
                         
                         updateDisplay();
                         return;
@@ -980,30 +971,45 @@
                         console.error('Ошибка при вычислении:', e);
                         state.currentInput = 'Ошибка';
                         state.fullExpression = '';
-                        state.resetInput = true;
+                        state.justCalculated = true;
                         updateDisplay();
                         return;
                     }
                 }
                 
-                if (!state.operation && !state.fullExpression) return;
-                
+                // Стандартный режим
                 const currentValue = parseFloat(state.currentInput);
-                const prevValue = parseFloat(state.previousInput);
                 
-                // Для обычного режима
-                const result = calculate();
-                state.lastResult = result;
-                
-                // Добавляем в историю
-                if (state.operation) {
+                // Если у нас есть операция и предыдущий ввод
+                if (state.operation && state.previousInput) {
+                    const prevValue = parseFloat(state.previousInput);
+                    const result = performCalculation(prevValue, currentValue, state.operation);
+                    
+                    // Добавляем в историю
                     addToHistory(`${prevValue} ${getOperationSymbol(state.operation)} ${currentValue}`, result);
+                    
+                    // Сохраняем для повторного использования
+                    state.lastOperand = currentValue;
+                    state.lastOperation = state.operation;
+                    
+                    // Обновляем состояние
+                    state.currentInput = result.toString();
+                    state.previousInput = '';
+                    state.operation = null;
+                    state.justCalculated = true;
+                    state.lastResult = result;
+                    
+                } else if (state.justCalculated && state.lastOperation && state.lastOperand) {
+                    // Если повторное нажатие на =, применяем последнюю операцию к текущему значению
+                    const currValue = parseFloat(state.currentInput);
+                    const result = performCalculation(currValue, state.lastOperand, state.lastOperation);
+                    
+                    // Добавляем в историю
+                    addToHistory(`${currValue} ${getOperationSymbol(state.lastOperation)} ${state.lastOperand}`, result);
+                    
+                    state.currentInput = result.toString();
+                    state.lastResult = result;
                 }
-                
-                state.currentInput = result.toString();
-                state.previousInput = '';
-                state.operation = null;
-                state.resetInput = true;
                 
                 updateDisplay();
             }
@@ -1020,23 +1026,24 @@
                     case 'mr': // Вызов из памяти
                         if (state.hasMemory) {
                             state.currentInput = state.memory.toString();
-                            state.resetInput = false;
+                            state.waitingForOperand = false;
+                            state.justCalculated = false;
                         }
                         break;
                     case 'ms': // Сохранение в память
                         state.memory = currentValue;
                         state.hasMemory = true;
-                        state.resetInput = true;
+                        state.waitingForOperand = true;
                         break;
                     case 'm-plus': // Добавление в память
                         state.memory += currentValue;
                         state.hasMemory = true;
-                        state.resetInput = true;
+                        state.waitingForOperand = true;
                         break;
                     case 'm-minus': // Вычитание из памяти
                         state.memory -= currentValue;
                         state.hasMemory = true;
-                        state.resetInput = true;
+                        state.waitingForOperand = true;
                         break;
                 }
                 updateDisplay();
@@ -1119,23 +1126,23 @@
                         break;
                     case 'bracket-left':
                         if (state.scientificMode) {
-                            if (state.currentInput === '0' || state.resetInput) {
+                            if (state.waitingForOperand || state.currentInput === '0') {
                                 state.fullExpression += '(';
                             } else {
                                 state.fullExpression += state.currentInput + ' * (';
                             }
                             state.currentInput = '0';
-                            state.resetInput = false;
+                            state.waitingForOperand = false;
                             state.brackets++;
                             updateDisplay();
                             return;
                         }
                         break;
-                    case 'bracket-right':
+                        case 'bracket-right':
                         if (state.scientificMode && state.brackets > 0) {
                             state.fullExpression += state.currentInput + ')';
                             state.currentInput = '0';
-                            state.resetInput = false;
+                            state.waitingForOperand = true;
                             state.brackets--;
                             updateDisplay();
                             return;
@@ -1156,7 +1163,7 @@
                         addToHistory(`${action}(${currentValue})`, result);
                     }
                     
-                    state.resetInput = true;
+                    state.waitingForOperand = true;
                     updateDisplay();
                 }
             }
@@ -1178,7 +1185,8 @@
                 state.previousInput = '';
                 state.fullExpression = '';
                 state.operation = null;
-                state.resetInput = false;
+                state.waitingForOperand = false;
+                state.justCalculated = false;
                 state.brackets = 0;
                 updateDisplay();
             }
@@ -1186,11 +1194,16 @@
             // Очистка текущего ввода
             function clearEntry() {
                 state.currentInput = '0';
+                state.waitingForOperand = false;
                 updateDisplay();
             }
             
             // Удаление последнего символа
             function handleBackspace() {
+                if (state.waitingForOperand || state.justCalculated) {
+                    return; // Ничего не делаем, если ожидается новый операнд или был вычислен результат
+                }
+                
                 if (state.currentInput.length > 1) {
                     state.currentInput = state.currentInput.slice(0, -1);
                 } else {
@@ -1211,14 +1224,8 @@
                 else if (target.hasAttribute('data-action')) {
                     const action = target.getAttribute('data-action');
                     
-                    // Проверка на двойной клик для операций
-                    const now = new Date().getTime();
-                    const isDoubleClick = (now - state.lastClickTime < 300) && state.lastClickedOperation === action;
-                    
                     if (['add', 'subtract', 'multiply', 'divide', 'power'].includes(action)) {
-                        handleOperation(action, isDoubleClick);
-                        state.lastClickTime = now;
-                        state.lastClickedOperation = action;
+                        handleOperation(action);
                     } else if (action === 'equals') {
                         handleEquals();
                     } else if (action === 'clear') {
@@ -1747,16 +1754,6 @@
                 updateGraphList();
             }
             
-            // Сглаживание значений при зуме
-            function smoothValue(value, target, factor) {
-                return value + factor * (target - value);
-            }
-            
-            // Ограничение значения в диапазоне
-            function clamp(value, min, max) {
-                return Math.max(min, Math.min(max, value));
-            }
-            
             // Проверка допустимости масштаба
             function isValidRange(xMin, xMax, yMin, yMax) {
                 const xRange = xMax - xMin;
@@ -1879,6 +1876,79 @@
             document.addEventListener('mouseup', endDrag);
             document.addEventListener('mouseleave', endDrag);
             
+            const tooltip = document.getElementById('graph-tooltip');
+
+            // Функция для поиска ближайшей точки на графике
+            function findNearestPoint(clickX, clickY) {
+                let minDistance = Infinity;
+                let nearestPoint = null;
+                
+                // Перебираем все активные графики
+                graphState.functions.forEach(func => {
+                    const xRange = graphState.xMax - graphState.xMin;
+                    const step = xRange / 1000; // Используем 1000 точек для поиска
+                    
+                    for (let x = graphState.xMin; x <= graphState.xMax; x += step) {
+                        const y = evaluateExpression(func.expr, x);
+                        if (isNaN(y) || !isFinite(y)) continue;
+                        
+                        const canvasX = mapXToCanvas(x);
+                        const canvasY = mapYToCanvas(y);
+                        
+                        const distance = Math.sqrt(
+                            Math.pow(canvasX - clickX, 2) + 
+                            Math.pow(canvasY - clickY, 2)
+                        );
+                        
+                        if (distance < minDistance && distance < 75) { // Увеличиваем максимальное расстояние для поиска с 50 до 75 пикселей
+                            minDistance = distance;
+                            nearestPoint = { x, y, color: func.color, canvasX, canvasY }; // Сохраняем координаты на холсте
+                        }
+                    }
+                });
+                
+                return nearestPoint;
+            }
+
+            // Обработчик движения мыши по холсту
+            canvas.addEventListener('mousemove', function(event) {
+                const rect = canvas.getBoundingClientRect();
+                const mouseX = event.clientX - rect.left;
+                const mouseY = event.clientY - rect.top;
+                
+                const nearestPoint = findNearestPoint(mouseX, mouseY);
+                
+                if (nearestPoint) {
+                    // Показываем тултип рядом с курсором мыши
+                    const rect = canvas.getBoundingClientRect();
+                    tooltip.style.display = 'block';
+                    tooltip.style.left = `${event.clientX + 0}px`;
+                    tooltip.style.top = `${event.clientY + 330}px`; 
+                    tooltip.innerHTML = `x: ${nearestPoint.x.toFixed(2)}<br>y: ${nearestPoint.y.toFixed(2)}`;
+                    tooltip.style.borderLeft = `3px solid ${nearestPoint.color}`;
+                    
+                    // Рисуем точку на графике
+                    redrawGraphs(); // Перерисовываем графики, чтобы убрать предыдущую точку
+                    
+                    // Рисуем точку на месте ближайшей точки графика
+                    ctx.beginPath();
+                    ctx.arc(nearestPoint.canvasX, nearestPoint.canvasY, 5, 0, 2 * Math.PI);
+                    ctx.fillStyle = nearestPoint.color;
+                    ctx.fill();
+                    ctx.strokeStyle = 'white';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                } else {
+                    tooltip.style.display = 'none';
+                    redrawGraphs(); // Перерисовываем графики, чтобы убрать точку
+                }
+            });
+
+            // Скрываем тултип при уходе с холста
+            canvas.addEventListener('mouseleave', function() {
+                tooltip.style.display = 'none';
+            });
+            
             // Добавляем обработчик события для колеса мыши на холсте
             canvas.addEventListener('wheel', zoomGraph);
             
@@ -1960,7 +2030,12 @@
                     handleOperation('add');
                 }
                 else if (e.key === '-') {
-                    handleOperation('subtract');
+                    // Если текущий ввод пуст или мы ожидаем новый операнд, начинаем ввод отрицательного числа
+                    if (state.currentInput === '0' || state.waitingForOperand) {
+                        handleNegate(); // Вводим минус как часть числа
+                    } else {
+                        handleOperation('subtract'); // Иначе это операция вычитания
+                    }
                 }
                 else if (e.key === '*') {
                     handleOperation('multiply');
